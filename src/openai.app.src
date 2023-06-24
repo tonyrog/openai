@@ -1,0 +1,9 @@
+{application, openai,
+ [{description, "OpenAI API Client"},
+  {vsn, git},
+  {modules, ["@@MODULES@@"]},
+%%  {mod, {App_app, []}},
+%%  {registered, [App_srv]},
+  {env, []},
+  {applications,[kernel,stdlib]}
+  ]}.
