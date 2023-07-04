@@ -5,9 +5,9 @@ Erlang OpenAI API
 
     /v1/chat/completions
 
-Use openai:char() as simple prompt reply loop.
+Use **openai:chat()** as simple prompt reply loop.
 
-Use openai:char_web() to have CharGPT to simulate a webserver, using the system prompt "Please pretend to be a web server only producing HTTP and HTML as output" The dialog is then run in a web browser using normal web requests!!!
+Use **openai:chat_web()** to have ChatGPT simulate a webserver, using the system prompt "Please pretend to be a web server only producing HTTP and HTML as output" The dialog is then run in a web browser using normal web requests!!!
 
     /v1/audio/transcriptions
 
