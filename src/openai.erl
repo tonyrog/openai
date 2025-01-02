@@ -11,20 +11,26 @@
 -include_lib("rester/include/rester_http.hrl").
 
 -export([list_models/0]).
+-export([show_models/0]).
 -export([get_model/1]).
--export([chat_compleations/1, chat_compleations/2]).
+-export([chat_compleations/1, chat_compleations/2, chat_compleations/3]).
 -export([translate/1, translate/2]).
 -export([transcribe/1, transcribe/2]).
+-export([upload/1]).
 -export([request_handler/4]).
+-export([select_model/0, select_model/1]).
+-export([default_model/0]).
 
 -define(SERVER, ?MODULE).
 -define(APP, ?MODULE).
+-define(DEFAULT_FILTER, [{id, "^gpt.*"}, {time, {2023,6,26}}]).
 
 -define(DEFAULT_BASEURL, "https://api.openai.com").
--define(DEFAULT_MODEL, "gpt-3.5-turbo").
+-define(DEFAULT_MODEL, "gpt-4").
 
--define(dbg(F, A), ok).
-%%-define(dbg(F, A), io:format((F), (A))).
+
+%% -define(dbg(F, A), ok).
+-define(dbg(F, A), io:format((F), (A))).
 
 -compile(export_all).
 
@@ -46,7 +52,7 @@ chat_web() ->
     IOServer = undefined,
     {ok,WebServer} = rester_http_server:start(8080, [RH]),
     ?dbg("WebServer: ~p\n", [WebServer]),
-    WebPrompt = <<"Please pretend to be a web server only produce HTTP and HTML as output">>,
+    WebPrompt = <<"Please pretend to be a web server only produce HTTP and HTML as output, first HTTP server replies with Content-Length header that is the length of the actual HTML content or other content. Be creative and interpret GET requests as prompts and generate dynamic web content accordingly.">>,
     {Content, Messages1} = chat_input(LogFd, <<"system">>, WebPrompt, Messages),
     erlang:display_string(iolist_to_binary(["Init Reponse: ", Content])),
     chat_loop(LogFd, IOServer, WebServer, Messages1),
@@ -123,7 +129,9 @@ request_handler(Socket, Request, _Body, ChatServer) -> %% fixme XArgs!
 	    ChatServer ! {self(), "GET " ++ Url#url.path ++ "\n"},
 	    receive
 		{ChatServer, Response} ->
-		    rester_socket:send(Socket, Response),
+		    Response1 = adjust_http_response(Response),
+		    ?dbg("[RESPONSE] ~p\n", [Response1]),
+		    rester_socket:send(Socket, Response1),
 		    %%rester_http_server:response_r(Socket, Request, 200, "OK", Response, []),
 		    ok
 	    end;
@@ -131,28 +139,164 @@ request_handler(Socket, Request, _Body, ChatServer) -> %% fixme XArgs!
 	    rester_http_server:response_r(Socket, Request, 404, "Not Found",
 					  "Object not found", [])
     end.
+
+adjust_http_response(Response) ->
+    case binary:match(Response, <<"Content-Length:">>) of
+	{Pos,Len} ->
+	    <<Before:Pos/binary, _:Len/binary, After/binary>> = Response,
+	    [OldLen, After1] = binary:split(After, <<"\n">>),
+	    [_, Content] = binary:split(After, <<"\n\n">>),
+	    ContentLength = byte_size(Content),
+	    io:format("Content-Length changed from ~p to ~w\n", 
+		      [OldLen, ContentLength]),
+	    iolist_to_binary([Before, 
+			      "Content-Length: ", 
+			      integer_to_list(ContentLength), "\n",
+			      After1]);
+	_ ->
+	    Response
+    end.
     
+i() ->
+    show_numbered_model_list().
+
+default_model() ->
+    list_to_binary(application:get_env(?APP, model, ?DEFAULT_MODEL)).
+
+select_model() ->
+    Models = numbered_model_list(),
+    print_numbered_models(Models),
+    NumberOfModels = length(Models),
+    io:format("Select model: [1-~w]: ", [NumberOfModels]),
+    Line = io:get_line(""),
+    try list_to_integer(string:trim(Line)) of
+	I when I > 0, I =< NumberOfModels ->
+	    {I, ID, _} = lists:nth(I, Models),
+	    Model = binary_to_list(ID),
+	    application:set_env(?APP, model, Model),
+	    Model;
+	true ->
+	    {error, bad_selection}
+    catch
+	error:badarg ->
+	    {error, bad_selection}
+    end.
+
+select_model(Model) ->
+    Model1 = iolist_to_binary([Model]),
+    Models = numbered_model_list(),
+    case lists:keyfind(Model1, 2, Models) of
+	false ->
+	    {error, {bad_model, Model}};
+	{_I, _ID, _} ->
+	    application:set_env(?APP, model, binary_to_list(Model1)),
+	    ok
+    end.
+
+
+show_models() ->
+    show_numbered_model_list(),
+    ok.
+
+numbered_model_list() ->
+    numbered_model_list(?DEFAULT_FILTER).
+
+numbered_model_list(Filter) ->
+    {ok, #{ <<"data">> := Models }} = list_models(),
+    filter_models(Models, 1, Filter).
+
+filter_models([#{ <<"id">> := ID, <<"created">> := Time}|Models], I, Filter) ->
+    case filter(Filter, ID, Time) of
+	true ->
+	    [{I, ID, Time} | filter_models(Models, I+1, Filter)];
+	false ->
+	    filter_models(Models, I, Filter)
+    end;
+filter_models([], _I, _Filter) ->
+    [].
+
+
+-define(UNIX_TIME, 62167219200).
+
+filter([{id,Regex}|Rest], ID, Time) ->
+    case re:run(ID, Regex) of
+	{match, _} -> filter(Rest, ID, Time);
+	nomatch -> false
+    end;
+filter([{time,Date={_Year,_Mon,_Day}}|Rest], ID, Time) ->
+    DateTime = {Date,{0,0,0}},
+    MatchTime = calendar:datetime_to_gregorian_seconds(DateTime) - ?UNIX_TIME,
+    if Time >= MatchTime -> 
+	    filter(Rest, ID, Time);
+       true -> false
+    end;
+filter([{time,DateTime={{_Year,_Mon,_Day},{_Hour,_Min,_Sec}}}|Rest],ID,Time) ->
+    MatchTime = calendar:datetime_to_gregorian_seconds(DateTime) - ?UNIX_TIME,
+    if Time >= MatchTime -> 
+	    filter(Rest, ID, Time);
+       true -> false
+    end;
+filter([], _ID, _Time) ->
+    true.
+    
+
+show_numbered_model_list() ->
+    Models = numbered_model_list(),
+    print_numbered_models(Models).
+
+print_numbered_models(Models) ->
+    Default = default_model(),
+    DefaultNum = case lists:keyfind(Default, 2, Models) of
+		     false -> 0;
+		     {D, _, _} -> D
+		 end,
+    io:format("Current model: ~p ~w\n", [Default, DefaultNum]),
+    lists:foreach(
+      fun({I, ID, Created}) ->
+	      Date = calendar:system_time_to_rfc3339(Created),
+	      Def = if I =:= DefaultNum -> "*" ; true -> "" end,
+	      io:format("~w~s: ~s [~s]\n", [I, Def, ID, Date])
+      end, Models).    
+
+
 
 list_models() ->
     Url = baseurl() ++ "/v1/models",
     wget(Url).
 
+
 get_model(Model) when is_list(Model) ->
     Url = baseurl() ++ "/v1/models/"++Model,
     wget(Url).
 
--spec chat_compleations(Model::string(), 
-			Messages::[#{ role => system | user | assistant | function, content => binary(), name => string(), function_call => term()}]) ->
-	  {ok, map()} | {error, Reason::term()}.
 				
 chat_compleations(Messages) ->
-    chat_compleations(model(), Messages).
+    chat_compleations(model(), Messages, []).
 
 chat_compleations(Model, Messages) ->
+    chat_compleations(Model, Messages, []).
+
+-type role() :: system | user | assistant | function.
+-type message() :: #{ role => role(), content => binary(),
+		      name => string(), function_call => term()}.
+-type tool() :: term().
+
+-spec chat_compleations(Model::string(), Messages::[message()], 
+			Tools::[tool()]) ->
+	  {ok, map()} | {error, Reason::term()}.
+
+chat_compleations(Model, Messages, Tools) ->
     Url = baseurl() ++ "/v1/chat/completions",
-    wpost(Url, "application/json", 
-	  #{ <<"model">> => iolist_to_binary(Model), 
-	     <<"messages">> => Messages}).
+    JBody0 = #{ <<"model">> => iolist_to_binary(Model), 
+		  <<"messages">> => Messages },
+    JBody = 
+	case Tools of 
+	    [] -> JBody0;
+	    undefined -> JBody0;
+	    [_|_] -> JBody0#{ <<"tools">> => Tools }
+	end,
+    wpost(Url, "application/json", JBody).
+
 
 transcribe(AudioFilename) ->
     transcribe(AudioFilename, []).
@@ -172,12 +316,39 @@ translate(AudioFilename, Opts) ->
 	   [{data, Key, Value} || {Key,Value} <- Opts]] ++
 	      [{file,"file", "application/octet-stream",AudioFilename}]).
 
+upload(Filename) ->
+    Url = baseurl() ++ "/v1/files",
+    wpost(Url, "multipart/form-data",
+	  [{file,"file", "application/octet-stream",Filename}]).
 
-wpost(Url, ContentType,  Data) ->
+%%
+%% options:
+%%   model => 'tts-1' | 'tts-1-hd'
+%%   voice => alloy|echo|fable|onyx|nova|shimmer
+%%   format => mp3 | opus | aac | flac
+%%
+speech(Text) ->
+    speech(Text, latin1, #{}).
+
+speech(Text, Charset, Options) ->
+    Url = baseurl() ++ "/v1/audio/speech",
+    Text1 = unicode:characters_to_binary(Text, Charset, utf8),
+    Format = maps:get(format, Options, "mp3"),
+    wpost_httpc(Url, "application/json", "audio/"++Format,
+	  #{ <<"model">> => <<"tts-1">>,
+	     <<"input">> => Text1,
+	     <<"voice">> => maps:get(voice, Options, <<"alloy">>)
+	   }).
+
+
+
+wpost(Url, ContentType, Data) ->
+    wpost(Url, ContentType, "application/json", Data).
+wpost(Url, ContentType,  AcceptType, Data) ->
     {_User, ApiKey} = api_key("openai.com"),
     Hs = [{'Authorization', ["Bearer ", ApiKey]},
 	  {'Content-Type', ContentType},
-	  {'Accept',"application/json"}],
+	  {'Accept',AcceptType}],
     ?dbg("Post: ~p\nHeaders: ~p\n", [Url, Hs]),
     ?dbg("Data:\n~p\n", [Data]),
     case rester_http:wpost(Url, Hs, Data) of 
@@ -212,14 +383,16 @@ wget(Url) ->
 	    {error, Reason}
     end.
 
-wpost_httpc(Url, JsonData) ->
+wpost_httpc(Url, ContentType, JsonData) ->
+    wpost_httpc(Url, ContentType, "application/json", JsonData).
+wpost_httpc(Url, ContentType, Accept, JsonData) ->
     {_User, ApiKey} = api_key("openai.com"),
-    Hs = [{"Content-Type", "application/json"},
+    Hs = [{"Content-Type", ContentType},
 	  {"Authorization", [<<"Bearer ">>, ApiKey]}],
     Body = jsone:encode(JsonData),
     ?dbg("POST: ~p\nHeaders: ~p\n", [Url, Hs]),
     ?dbg("Body:\n~s\n", [Body]),
-    case httpc:request(post, {Url, Hs, "application/json", Body},
+    case httpc:request(post, {Url, Hs, Accept, Body},
 		       [], [{body_format, binary}]) of
 	{ok,{{_Vsn,200,_Ok}, Headers, ReplyBody}} ->
 	    case proplists:get_value("content-type", Headers, "") of
@@ -253,8 +426,6 @@ wget_httpc(Url) ->
 	    {error, Reason}
     end.
 
-    
-		
 baseurl() ->
     case application:get_env(?APP, baseurl) of    
 	undefined ->
@@ -323,8 +494,4 @@ get_auth_info_(Fd, Host) ->
 	eof ->
 	    false
     end.
-		
-	    
-	    
-    
-    
+   
